@@ -1,281 +1,172 @@
-// server.js — TasteHub Express + MongoDB Backend
 require('dotenv').config();
 
-const express  = require('express');
-const mongoose = require('mongoose');
-const cors     = require('cors');
-const { Menu, Inventory, Order } = require('./models');
+const express = require('express');
+const cors = require('cors');
+const store = require('./data/store');
 
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ─── MIDDLEWARE ──────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public')); // serves the tastehub HTML
+app.use(express.static('public'));
 
-// ─── DB CONNECTION ───────────────────────────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅ MongoDB connected:', process.env.MONGODB_URI))
-  .catch(err => { console.error('❌ MongoDB error:', err.message); process.exit(1); });
+const handleError = (res, error) => {
+  const status = error.status || 500;
+  res.status(status).json({ error: error.message || 'Internal server error' });
+};
 
-// Clean up legacy unique index on "id" that causes E11000 when id is null
-mongoose.connection.once('open', async () => {
+app.get('/api/health', (_, res) => res.json(store.getHealth()));
+
+app.get('/api/menu', async (_, res) => {
   try {
-    const indexes = await mongoose.connection.db.collection('orders').indexes();
-    const hasBadIndex = indexes.find(i => i.name === 'id_1' && i.unique);
-    if (hasBadIndex) {
-      await mongoose.connection.db.collection('orders').dropIndex('id_1');
-      console.log('🧹 Dropped legacy unique index id_1 on orders');
-    }
-  } catch (e) {
-    console.warn('Index cleanup skipped:', e.message);
-  }
-
-  // Fallback: drop any other custom indexes on orders except _id
-  try {
-    const idx = await mongoose.connection.db.collection('orders').indexes();
-    const extra = idx.filter(i => i.name !== '_id_');
-    if (extra.length) {
-      await mongoose.connection.db.collection('orders').dropIndexes();
-      console.log('🧹 Dropped all non-_id indexes on orders');
-    }
-  } catch (e) {
-    console.warn('Index cleanup skipped:', e.message);
+    res.json(store.listMenu());
+  } catch (error) {
+    handleError(res, error);
   }
 });
 
-// ─── HEALTH ──────────────────────────────────────────────────────────────────
-app.get('/api/health', (_, res) => res.json({ ok: true, db: mongoose.connection.readyState }));
-
-// ════════════════════════════════════════════════════════════════════════════
-//  MENU ROUTES
-// ════════════════════════════════════════════════════════════════════════════
-
-// GET  /api/menu          — list all menu items
-app.get('/api/menu', async (req, res) => {
-  try {
-    const items = await Menu.find().sort({ category: 1, name: 1 });
-    res.json(items);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// GET  /api/menu/:id      — get single item
 app.get('/api/menu/:id', async (req, res) => {
   try {
-    const item = await Menu.findById(req.params.id);
-    if (!item) return res.status(404).json({ error: 'Not found' });
-    res.json(item);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json(store.getMenu(req.params.id));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// POST /api/menu          — create a new dish
 app.post('/api/menu', async (req, res) => {
   try {
-    const item = await Menu.create(req.body);
-    res.status(201).json(item);
-  } catch (e) { res.status(400).json({ error: e.message }); }
+    res.status(201).json(store.createMenu(req.body));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// PUT  /api/menu/:id      — update a dish
 app.put('/api/menu/:id', async (req, res) => {
   try {
-    const item = await Menu.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
-    if (!item) return res.status(404).json({ error: 'Not found' });
-    res.json(item);
-  } catch (e) { res.status(400).json({ error: e.message }); }
+    res.json(store.updateMenu(req.params.id, req.body));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// DELETE /api/menu/:id    — remove a dish
 app.delete('/api/menu/:id', async (req, res) => {
   try {
-    const item = await Menu.findByIdAndDelete(req.params.id);
-    if (!item) return res.status(404).json({ error: 'Not found' });
+    store.deleteMenu(req.params.id);
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// ════════════════════════════════════════════════════════════════════════════
-//  INVENTORY ROUTES
-// ════════════════════════════════════════════════════════════════════════════
-
-// GET  /api/inventory          — list all inventory items
-app.get('/api/inventory', async (req, res) => {
+app.get('/api/inventory', async (_, res) => {
   try {
-    const items = await Inventory.find().sort({ category: 1, name: 1 });
-    res.json(items);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json(store.listInventory());
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// GET  /api/inventory/alerts   — items at or below low-stock threshold
-app.get('/api/inventory/alerts', async (req, res) => {
+app.get('/api/inventory/alerts', async (_, res) => {
   try {
-    const items = await Inventory.find({ $expr: { $lte: ['$stock', '$low'] } });
-    res.json(items);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json(store.listInventoryAlerts());
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// GET  /api/inventory/:id
 app.get('/api/inventory/:id', async (req, res) => {
   try {
-    const item = await Inventory.findById(req.params.id);
-    if (!item) return res.status(404).json({ error: 'Not found' });
-    res.json(item);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json(store.getInventory(req.params.id));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// POST /api/inventory          — add new item
 app.post('/api/inventory', async (req, res) => {
   try {
-    const item = await Inventory.create(req.body);
-    res.status(201).json(item);
-  } catch (e) { res.status(400).json({ error: e.message }); }
+    res.status(201).json(store.createInventory(req.body));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// PUT  /api/inventory/:id      — edit item
 app.put('/api/inventory/:id', async (req, res) => {
   try {
-    const item = await Inventory.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
-    if (!item) return res.status(404).json({ error: 'Not found' });
-    res.json(item);
-  } catch (e) { res.status(400).json({ error: e.message }); }
+    res.json(store.updateInventory(req.params.id, req.body));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// PATCH /api/inventory/:id/restock  — add stock quantity
 app.patch('/api/inventory/:id/restock', async (req, res) => {
   try {
-    const { qty } = req.body;
-    if (!qty || qty <= 0) return res.status(400).json({ error: 'qty must be > 0' });
-    const item = await Inventory.findByIdAndUpdate(
-      req.params.id,
-      { $inc: { stock: qty } },
-      { new: true }
-    );
-    if (!item) return res.status(404).json({ error: 'Not found' });
-    res.json(item);
-  } catch (e) { res.status(400).json({ error: e.message }); }
+    res.json(store.restockInventory(req.params.id, req.body.qty));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// DELETE /api/inventory/:id
 app.delete('/api/inventory/:id', async (req, res) => {
   try {
-    const item = await Inventory.findByIdAndDelete(req.params.id);
-    if (!item) return res.status(404).json({ error: 'Not found' });
+    store.deleteInventory(req.params.id);
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// ════════════════════════════════════════════════════════════════════════════
-//  ORDER ROUTES
-// ════════════════════════════════════════════════════════════════════════════
-
-// GET  /api/orders              — list all orders (optionally filter by status/table)
 app.get('/api/orders', async (req, res) => {
   try {
-    const filter = {};
-    if (req.query.status) filter.status = req.query.status;
-    if (req.query.table)  filter.table  = req.query.table;
-    if (req.query.active === 'true') filter.status = { $ne: 'Served' };
-    const orders = await Order.find(filter).sort({ createdAt: -1 });
-    res.json(orders);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json(store.listOrders(req.query));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// GET  /api/orders/stats        — today's summary stats
-app.get('/api/orders/stats', async (req, res) => {
+app.get('/api/orders/stats', async (_, res) => {
   try {
-    const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
-    const [todayOrders, activeOrders] = await Promise.all([
-      Order.find({ createdAt: { $gte: startOfDay } }),
-      Order.find({ status: { $ne: 'Served' } }),
-    ]);
-    const revenue = todayOrders.reduce((sum, o) => sum + o.total, 0);
-    const activeTables = new Set(activeOrders.map(o => o.table)).size;
-
-    // Top dishes today
-    const dishCount = {};
-    todayOrders.forEach(o => o.items.forEach(i => {
-      const key = i.menuItemId?.toString() || i.name;
-      if (!dishCount[key]) dishCount[key] = { name: i.name, emoji: i.emoji, price: i.price, count: 0 };
-      dishCount[key].count += i.qty;
-    }));
-    const topDishes = Object.values(dishCount)
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 6);
-
-    res.json({ revenue, totalOrders: todayOrders.length, activeTables, activeOrders: activeOrders.length, topDishes });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json(store.getOrderStats());
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// GET  /api/orders/:id
 app.get('/api/orders/:id', async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id);
-    if (!order) return res.status(404).json({ error: 'Not found' });
-    res.json(order);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json(store.getOrder(req.params.id));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// POST /api/orders              — place a new order
 app.post('/api/orders', async (req, res) => {
   try {
-    // Auto-generate order number
-    const last = await Order.findOne().sort({ orderNumber: -1 });
-    const orderNumber = (last?.orderNumber || 1000) + 1;
-
-    // Sanitize payload to avoid duplicate key on id/null and enforce shape
-    const items = (req.body.items || []).map(it => ({
-      menuItemId: it.menuItemId || it.id || it._id,
-      name: it.name,
-      emoji: it.emoji,
-      price: it.price,
-      qty: it.qty,
-    }));
-    const order = await Order.create({
-      // ensure no stray "id" field
-      table: req.body.table,
-      placedBy: req.body.placedBy || 'admin',
-      status: req.body.status || 'Pending',
-      items,
-      total: req.body.total,
-      orderNumber,
-      note: req.body.note || '',
-    });
-
-    // Consume inventory based on order items (optional — expand MAP as needed)
-    const CONSUMPTION_MAP = {
-      // menuItemName -> [inventoryItemName, amtPerServing]
-      // This uses names for portability; feel free to switch to IDs after seeding
-    };
-
-    res.status(201).json(order);
-  } catch (e) { res.status(400).json({ error: e.message }); }
+    res.status(201).json(store.createOrder(req.body));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// PATCH /api/orders/:id/status  — update order status
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
-    const { status } = req.body;
-    const allowed = ['Pending', 'Preparing', 'Ready', 'Served'];
-    if (!allowed.includes(status)) return res.status(400).json({ error: 'Invalid status' });
-
-    const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
-    if (!order) return res.status(404).json({ error: 'Not found' });
-    res.json(order);
-  } catch (e) { res.status(400).json({ error: e.message }); }
+    res.json(store.updateOrderStatus(req.params.id, req.body.status));
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// DELETE /api/orders/:id
 app.delete('/api/orders/:id', async (req, res) => {
   try {
-    const order = await Order.findByIdAndDelete(req.params.id);
-    if (!order) return res.status(404).json({ error: 'Not found' });
+    store.deleteOrder(req.params.id);
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (error) {
+    handleError(res, error);
+  }
 });
 
-// ─── START ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`🚀 TasteHub API running at http://localhost:${PORT}`);
-  console.log(`   Endpoints: /api/menu  /api/inventory  /api/orders`);
+  console.log(`TasteHub API running at http://localhost:${PORT}`);
+  console.log('Storage mode: local in-memory store');
+  console.log('Next step: replace data/store.js with a DynamoDB-backed implementation');
 });
