@@ -5,7 +5,7 @@ const cors = require('cors');
 const store = require('./data/store');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
@@ -16,11 +16,18 @@ const handleError = (res, error) => {
   res.status(status).json({ error: error.message || 'Internal server error' });
 };
 
+// Root route — serve the HTML
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/public/tastehub.html');
+});
+
+// ── Health ────────────────────────────────────────────────────────────────────
 app.get('/api/health', (_, res) => res.json(store.getHealth()));
 
+// ── Menu ──────────────────────────────────────────────────────────────────────
 app.get('/api/menu', async (_, res) => {
   try {
-    res.json(store.listMenu());
+    res.json(await store.listMenu());
   } catch (error) {
     handleError(res, error);
   }
@@ -28,7 +35,7 @@ app.get('/api/menu', async (_, res) => {
 
 app.get('/api/menu/:id', async (req, res) => {
   try {
-    res.json(store.getMenu(req.params.id));
+    res.json(await store.getMenu(req.params.id));
   } catch (error) {
     handleError(res, error);
   }
@@ -36,7 +43,7 @@ app.get('/api/menu/:id', async (req, res) => {
 
 app.post('/api/menu', async (req, res) => {
   try {
-    res.status(201).json(store.createMenu(req.body));
+    res.status(201).json(await store.createMenu(req.body));
   } catch (error) {
     handleError(res, error);
   }
@@ -44,7 +51,7 @@ app.post('/api/menu', async (req, res) => {
 
 app.put('/api/menu/:id', async (req, res) => {
   try {
-    res.json(store.updateMenu(req.params.id, req.body));
+    res.json(await store.updateMenu(req.params.id, req.body));
   } catch (error) {
     handleError(res, error);
   }
@@ -52,16 +59,17 @@ app.put('/api/menu/:id', async (req, res) => {
 
 app.delete('/api/menu/:id', async (req, res) => {
   try {
-    store.deleteMenu(req.params.id);
+    await store.deleteMenu(req.params.id);
     res.json({ success: true });
   } catch (error) {
     handleError(res, error);
   }
 });
 
+// ── Inventory ─────────────────────────────────────────────────────────────────
 app.get('/api/inventory', async (_, res) => {
   try {
-    res.json(store.listInventory());
+    res.json(await store.listInventory());
   } catch (error) {
     handleError(res, error);
   }
@@ -69,7 +77,7 @@ app.get('/api/inventory', async (_, res) => {
 
 app.get('/api/inventory/alerts', async (_, res) => {
   try {
-    res.json(store.listInventoryAlerts());
+    res.json(await store.listInventoryAlerts());
   } catch (error) {
     handleError(res, error);
   }
@@ -77,7 +85,7 @@ app.get('/api/inventory/alerts', async (_, res) => {
 
 app.get('/api/inventory/:id', async (req, res) => {
   try {
-    res.json(store.getInventory(req.params.id));
+    res.json(await store.getInventory(req.params.id));
   } catch (error) {
     handleError(res, error);
   }
@@ -85,7 +93,7 @@ app.get('/api/inventory/:id', async (req, res) => {
 
 app.post('/api/inventory', async (req, res) => {
   try {
-    res.status(201).json(store.createInventory(req.body));
+    res.status(201).json(await store.createInventory(req.body));
   } catch (error) {
     handleError(res, error);
   }
@@ -93,7 +101,7 @@ app.post('/api/inventory', async (req, res) => {
 
 app.put('/api/inventory/:id', async (req, res) => {
   try {
-    res.json(store.updateInventory(req.params.id, req.body));
+    res.json(await store.updateInventory(req.params.id, req.body));
   } catch (error) {
     handleError(res, error);
   }
@@ -101,7 +109,7 @@ app.put('/api/inventory/:id', async (req, res) => {
 
 app.patch('/api/inventory/:id/restock', async (req, res) => {
   try {
-    res.json(store.restockInventory(req.params.id, req.body.qty));
+    res.json(await store.restockInventory(req.params.id, req.body.qty));
   } catch (error) {
     handleError(res, error);
   }
@@ -109,16 +117,17 @@ app.patch('/api/inventory/:id/restock', async (req, res) => {
 
 app.delete('/api/inventory/:id', async (req, res) => {
   try {
-    store.deleteInventory(req.params.id);
+    await store.deleteInventory(req.params.id);
     res.json({ success: true });
   } catch (error) {
     handleError(res, error);
   }
 });
 
+// ── Orders ────────────────────────────────────────────────────────────────────
 app.get('/api/orders', async (req, res) => {
   try {
-    res.json(store.listOrders(req.query));
+    res.json(await store.listOrders(req.query));
   } catch (error) {
     handleError(res, error);
   }
@@ -126,7 +135,7 @@ app.get('/api/orders', async (req, res) => {
 
 app.get('/api/orders/stats', async (_, res) => {
   try {
-    res.json(store.getOrderStats());
+    res.json(await store.getOrderStats());
   } catch (error) {
     handleError(res, error);
   }
@@ -134,7 +143,7 @@ app.get('/api/orders/stats', async (_, res) => {
 
 app.get('/api/orders/:id', async (req, res) => {
   try {
-    res.json(store.getOrder(req.params.id));
+    res.json(await store.getOrder(req.params.id));
   } catch (error) {
     handleError(res, error);
   }
@@ -142,7 +151,7 @@ app.get('/api/orders/:id', async (req, res) => {
 
 app.post('/api/orders', async (req, res) => {
   try {
-    res.status(201).json(store.createOrder(req.body));
+    res.status(201).json(await store.createOrder(req.body));
   } catch (error) {
     handleError(res, error);
   }
@@ -150,7 +159,7 @@ app.post('/api/orders', async (req, res) => {
 
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
-    res.json(store.updateOrderStatus(req.params.id, req.body.status));
+    res.json(await store.updateOrderStatus(req.params.id, req.body.status));
   } catch (error) {
     handleError(res, error);
   }
@@ -158,15 +167,16 @@ app.patch('/api/orders/:id/status', async (req, res) => {
 
 app.delete('/api/orders/:id', async (req, res) => {
   try {
-    store.deleteOrder(req.params.id);
+    await store.deleteOrder(req.params.id);
     res.json({ success: true });
   } catch (error) {
     handleError(res, error);
   }
 });
 
+// ── Start Server ──────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`TasteHub API running at http://localhost:${PORT}`);
-  console.log('Storage mode: local in-memory store');
-  console.log('Next step: replace data/store.js with a DynamoDB-backed implementation');
+  console.log(`Region: ${process.env.AWS_REGION}`);
+  console.log(`DynamoDB Table Prefix: ${process.env.DYNAMODB_TABLE_PREFIX}`);
 });
