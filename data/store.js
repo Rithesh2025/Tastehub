@@ -1,13 +1,33 @@
 const crypto = require('crypto');
-const { MENU_DATA, INVENTORY_DATA } = require('./defaultData');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+  DeleteCommand,
+  ScanCommand,
+  QueryCommand
+} = require('@aws-sdk/lib-dynamodb');
 
-const MENU_CATEGORIES = ['Starters', 'Mains', 'Breads', 'Rice & Biryani', 'Desserts', 'Drinks'];
+// ─── DynamoDB Client Setup ────────────────────────────────────────────────────
+const client = new DynamoDBClient({ region: process.env.AWS_REGION || 'ap-south-1' });
+const db = DynamoDBDocumentClient.from(client);
+
+const PREFIX = process.env.DYNAMODB_TABLE_PREFIX || 'tastehub';
+const MENU_TABLE       = `${PREFIX}_menu`;
+const INVENTORY_TABLE  = `${PREFIX}_inventory`;
+const ORDERS_TABLE     = `${PREFIX}_orders`;
+const COUNTER_TABLE    = `${PREFIX}_counters`;
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const MENU_CATEGORIES      = ['Starters', 'Mains', 'Breads', 'Rice & Biryani', 'Desserts', 'Drinks'];
 const INVENTORY_CATEGORIES = ['Produce', 'Protein', 'Dairy', 'Dry Goods', 'Beverages'];
-const ORDER_STATUSES = ['Pending', 'Preparing', 'Ready', 'Served'];
+const ORDER_STATUSES       = ['Pending', 'Preparing', 'Ready', 'Served'];
 
-const clone = (value) => JSON.parse(JSON.stringify(value));
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 const nowIso = () => new Date().toISOString();
-const newId = () => crypto.randomUUID();
+const newId  = () => crypto.randomUUID();
 
 function httpError(status, message) {
   const error = new Error(message);
@@ -15,6 +35,7 @@ function httpError(status, message) {
   return error;
 }
 
+// ─── Validation ───────────────────────────────────────────────────────────────
 function validateMenuInput(payload) {
   if (!payload || typeof payload !== 'object') throw httpError(400, 'Invalid menu payload');
   if (!payload.name || typeof payload.name !== 'string') throw httpError(400, 'name is required');
@@ -23,7 +44,7 @@ function validateMenuInput(payload) {
 
   return {
     name: payload.name.trim(),
-    emoji: typeof payload.emoji === 'string' ? payload.emoji : '\ud83c\udf7d\ufe0f',
+    emoji: typeof payload.emoji === 'string' ? payload.emoji : '🍽️',
     price: payload.price,
     category: payload.category,
     desc: typeof payload.desc === 'string' ? payload.desc : '',
@@ -77,7 +98,7 @@ function validateOrderInput(payload, orderNumber) {
   const items = sanitizeOrderItems(payload.items);
   const total = typeof payload.total === 'number'
     ? payload.total
-    : items.reduce((sum, item) => sum + (item.price * item.qty), 0);
+    : items.reduce((sum, item) => sum + item.price * item.qty, 0);
 
   if (total < 0) throw httpError(400, 'total must be non-negative');
 
@@ -92,116 +113,174 @@ function validateOrderInput(payload, orderNumber) {
   };
 }
 
-function sortBy(fields) {
-  return (a, b) => {
-    for (const field of fields) {
-      const left = a[field];
-      const right = b[field];
-      if (left === right) continue;
-      if (left == null) return 1;
-      if (right == null) return -1;
-      return left < right ? -1 : 1;
-    }
-    return 0;
-  };
+// ─── DynamoDB Utilities ───────────────────────────────────────────────────────
+
+// Scan all items from a table
+async function scanAll(tableName) {
+  const items = [];
+  let lastKey;
+
+  do {
+    const params = { TableName: tableName };
+    if (lastKey) params.ExclusiveStartKey = lastKey;
+
+    const result = await db.send(new ScanCommand(params));
+    items.push(...(result.Items || []));
+    lastKey = result.LastEvaluatedKey;
+  } while (lastKey);
+
+  return items;
 }
 
-let menu = [];
-let inventory = [];
-let orders = [];
-let nextOrderNumber = 1001;
+// Get a single item by id, throws 404 if not found
+async function getItemById(tableName, id, label) {
+  const result = await db.send(new GetCommand({
+    TableName: tableName,
+    Key: { id }
+  }));
 
-function withMeta(record) {
-  const timestamp = nowIso();
-  return { id: newId(), createdAt: timestamp, updatedAt: timestamp, ...record };
+  if (!result.Item) throw httpError(404, `${label} not found`);
+  return result.Item;
 }
 
-function reset() {
-  menu = MENU_DATA.map((item) => withMeta(validateMenuInput(item)));
-  inventory = INVENTORY_DATA.map((item) => withMeta(validateInventoryInput(item)));
-  orders = [];
-  nextOrderNumber = 1001;
+// Get next order number using atomic counter in DynamoDB
+async function getNextOrderNumber() {
+  const result = await db.send(new UpdateCommand({
+    TableName: COUNTER_TABLE,
+    Key: { id: 'orderNumber' },
+    UpdateExpression: 'SET #val = if_not_exists(#val, :start) + :inc',
+    ExpressionAttributeNames: { '#val': 'value' },
+    ExpressionAttributeValues: { ':start': 1000, ':inc': 1 },
+    ReturnValues: 'UPDATED_NEW'
+  }));
+
+  return result.Attributes.value;
 }
 
-reset();
-
-function getById(collection, id, label) {
-  const item = collection.find((entry) => entry.id === id);
-  if (!item) throw httpError(404, `${label} not found`);
-  return item;
-}
-
+// ─── Store API ────────────────────────────────────────────────────────────────
 module.exports = {
-  reset,
+  httpError,
+
   getHealth() {
-    return { ok: true, db: 'local-memory' };
+    return { ok: true, db: 'dynamodb' };
   },
-  listMenu() {
-    return clone(menu).sort(sortBy(['category', 'name']));
+
+  // ── Menu ──────────────────────────────────────────────────────────────────
+  async listMenu() {
+    const items = await scanAll(MENU_TABLE);
+    return items.sort((a, b) =>
+      a.category.localeCompare(b.category) || a.name.localeCompare(b.name)
+    );
   },
-  getMenu(id) {
-    return clone(getById(menu, id, 'Menu item'));
+
+  async getMenu(id) {
+    return getItemById(MENU_TABLE, id, 'Menu item');
   },
-  createMenu(payload) {
-    const item = withMeta(validateMenuInput(payload));
-    menu.push(item);
-    return clone(item);
+
+  async createMenu(payload) {
+    const timestamp = nowIso();
+    const item = {
+      id: newId(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      ...validateMenuInput(payload)
+    };
+    await db.send(new PutCommand({ TableName: MENU_TABLE, Item: item }));
+    return item;
   },
-  updateMenu(id, payload) {
-    const existing = getById(menu, id, 'Menu item');
-    const updated = { ...existing, ...validateMenuInput({ ...existing, ...payload }), updatedAt: nowIso() };
-    menu = menu.map((item) => item.id === id ? updated : item);
-    return clone(updated);
+
+  async updateMenu(id, payload) {
+    const existing = await getItemById(MENU_TABLE, id, 'Menu item');
+    const updated = {
+      ...existing,
+      ...validateMenuInput({ ...existing, ...payload }),
+      updatedAt: nowIso()
+    };
+    await db.send(new PutCommand({ TableName: MENU_TABLE, Item: updated }));
+    return updated;
   },
-  deleteMenu(id) {
-    getById(menu, id, 'Menu item');
-    menu = menu.filter((item) => item.id !== id);
+
+  async deleteMenu(id) {
+    await getItemById(MENU_TABLE, id, 'Menu item');
+    await db.send(new DeleteCommand({ TableName: MENU_TABLE, Key: { id } }));
   },
-  listInventory() {
-    return clone(inventory).sort(sortBy(['category', 'name']));
+
+  // ── Inventory ─────────────────────────────────────────────────────────────
+  async listInventory() {
+    const items = await scanAll(INVENTORY_TABLE);
+    return items.sort((a, b) =>
+      a.category.localeCompare(b.category) || a.name.localeCompare(b.name)
+    );
   },
-  listInventoryAlerts() {
-    return clone(inventory.filter((item) => item.stock <= item.low)).sort(sortBy(['category', 'name']));
+
+  async listInventoryAlerts() {
+    const items = await scanAll(INVENTORY_TABLE);
+    return items
+      .filter((item) => item.stock <= item.low)
+      .sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
   },
-  getInventory(id) {
-    return clone(getById(inventory, id, 'Inventory item'));
+
+  async getInventory(id) {
+    return getItemById(INVENTORY_TABLE, id, 'Inventory item');
   },
-  createInventory(payload) {
-    const item = withMeta(validateInventoryInput(payload));
-    inventory.push(item);
-    return clone(item);
+
+  async createInventory(payload) {
+    const timestamp = nowIso();
+    const item = {
+      id: newId(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      ...validateInventoryInput(payload)
+    };
+    await db.send(new PutCommand({ TableName: INVENTORY_TABLE, Item: item }));
+    return item;
   },
-  updateInventory(id, payload) {
-    const existing = getById(inventory, id, 'Inventory item');
-    const updated = { ...existing, ...validateInventoryInput({ ...existing, ...payload }), updatedAt: nowIso() };
-    inventory = inventory.map((item) => item.id === id ? updated : item);
-    return clone(updated);
+
+  async updateInventory(id, payload) {
+    const existing = await getItemById(INVENTORY_TABLE, id, 'Inventory item');
+    const updated = {
+      ...existing,
+      ...validateInventoryInput({ ...existing, ...payload }),
+      updatedAt: nowIso()
+    };
+    await db.send(new PutCommand({ TableName: INVENTORY_TABLE, Item: updated }));
+    return updated;
   },
-  restockInventory(id, qty) {
+
+  async restockInventory(id, qty) {
     if (typeof qty !== 'number' || qty <= 0) throw httpError(400, 'qty must be > 0');
-    const existing = getById(inventory, id, 'Inventory item');
+    const existing = await getItemById(INVENTORY_TABLE, id, 'Inventory item');
     const updated = { ...existing, stock: existing.stock + qty, updatedAt: nowIso() };
-    inventory = inventory.map((item) => item.id === id ? updated : item);
-    return clone(updated);
+    await db.send(new PutCommand({ TableName: INVENTORY_TABLE, Item: updated }));
+    return updated;
   },
-  deleteInventory(id) {
-    getById(inventory, id, 'Inventory item');
-    inventory = inventory.filter((item) => item.id !== id);
+
+  async deleteInventory(id) {
+    await getItemById(INVENTORY_TABLE, id, 'Inventory item');
+    await db.send(new DeleteCommand({ TableName: INVENTORY_TABLE, Key: { id } }));
   },
-  listOrders(filters = {}) {
-    let filtered = [...orders];
-    if (filters.status) filtered = filtered.filter((order) => order.status === filters.status);
-    if (filters.table) filtered = filtered.filter((order) => order.table === filters.table);
-    if (filters.active === 'true') filtered = filtered.filter((order) => order.status !== 'Served');
-    return clone(filtered).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  // ── Orders ────────────────────────────────────────────────────────────────
+  async listOrders(filters = {}) {
+    let items = await scanAll(ORDERS_TABLE);
+
+    if (filters.status) items = items.filter((o) => o.status === filters.status);
+    if (filters.table)  items = items.filter((o) => o.table === filters.table);
+    if (filters.active === 'true') items = items.filter((o) => o.status !== 'Served');
+
+    return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   },
-  getOrderStats() {
+
+  async getOrderStats() {
+    const allOrders = await scanAll(ORDERS_TABLE);
+
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
-    const todayOrders = orders.filter((order) => new Date(order.createdAt) >= startOfDay);
-    const activeOrders = orders.filter((order) => order.status !== 'Served');
-    const revenue = todayOrders.reduce((sum, order) => sum + order.total, 0);
-    const activeTables = new Set(activeOrders.map((order) => order.table)).size;
+
+    const todayOrders  = allOrders.filter((o) => new Date(o.createdAt) >= startOfDay);
+    const activeOrders = allOrders.filter((o) => o.status !== 'Served');
+    const revenue      = todayOrders.reduce((sum, o) => sum + o.total, 0);
+    const activeTables = new Set(activeOrders.map((o) => o.table)).size;
 
     const dishCount = {};
     for (const order of todayOrders) {
@@ -226,24 +305,34 @@ module.exports = {
       topDishes
     };
   },
-  getOrder(id) {
-    return clone(getById(orders, id, 'Order'));
+
+  async getOrder(id) {
+    return getItemById(ORDERS_TABLE, id, 'Order');
   },
-  createOrder(payload) {
-    const order = withMeta(validateOrderInput(payload, nextOrderNumber++));
-    orders.push(order);
-    return clone(order);
+
+  async createOrder(payload) {
+    const orderNumber = await getNextOrderNumber();
+    const timestamp = nowIso();
+    const order = {
+      id: newId(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      ...validateOrderInput(payload, orderNumber)
+    };
+    await db.send(new PutCommand({ TableName: ORDERS_TABLE, Item: order }));
+    return order;
   },
-  updateOrderStatus(id, status) {
+
+  async updateOrderStatus(id, status) {
     if (!ORDER_STATUSES.includes(status)) throw httpError(400, 'Invalid status');
-    const existing = getById(orders, id, 'Order');
+    const existing = await getItemById(ORDERS_TABLE, id, 'Order');
     const updated = { ...existing, status, updatedAt: nowIso() };
-    orders = orders.map((order) => order.id === id ? updated : order);
-    return clone(updated);
+    await db.send(new PutCommand({ TableName: ORDERS_TABLE, Item: updated }));
+    return updated;
   },
-  deleteOrder(id) {
-    getById(orders, id, 'Order');
-    orders = orders.filter((order) => order.id !== id);
-  },
-  httpError
+
+  async deleteOrder(id) {
+    await getItemById(ORDERS_TABLE, id, 'Order');
+    await db.send(new DeleteCommand({ TableName: ORDERS_TABLE, Key: { id } }));
+  }
 };
