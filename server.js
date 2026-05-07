@@ -18,7 +18,7 @@ const handleError = (res, error) => {
 
 // Root route — serve the HTML
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/public/tastehub.html');
+  res.sendFile(__dirname + '/public/Tastehub.html');
 });
 
 // ── Health ────────────────────────────────────────────────────────────────────
